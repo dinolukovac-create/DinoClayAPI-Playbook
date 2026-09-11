@@ -2,7 +2,7 @@
 """Diff live Clay columns against exported files. Read-only, free. Exit 1 on drift.
 
 Run this at the start of any session touching an existing table. Prompts edited in the UI, or rewritten
-by Clay's own AI builder, live only in Clay — a repo copy silently stops matching production.
+by Clay's own AI builder, live only in Clay: a repo copy silently stops matching production.
 
 usage: python examples/06_drift_check.py [config_dir] [--verbose]
 """

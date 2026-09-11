@@ -1,10 +1,10 @@
 # Clay API Playbook
 
-**Everything needed to build, run and maintain Clay tables programmatically — including the failure modes
+**Everything needed to build, run and maintain Clay tables programmatically, including the failure modes
 that are not written down anywhere else.**
 
-**Clay has two separate programmatic surfaces.** The **REST API** (§4–§7) builds and runs table
-infrastructure. The **MCP server** (§4b) searches Clay's own people and company database — that is where
+**Clay has two separate programmatic surfaces.** The **REST API** (§4-§7) builds and runs table
+infrastructure. The **MCP server** (§4b) searches Clay's own people and company database, which is where
 sourcing lives. They do not share a data model, and knowing which one to reach for is most of the battle.
 
 Clay publishes no REST API documentation. `docs.clay.com` redirects to a UI-focused university site, there is
@@ -22,9 +22,9 @@ to be corrected and one incident that destroyed live data.
 
 1. [Setup and access](#1-setup-and-access)
 2. [The data model](#2-the-data-model)
-3. [**The seven silent failures**](#3-the-seven-silent-failures) ← read first
+3. [**The seven silent failures**](#3-the-ten-silent-failures) ← read first
 4. [Route reference](#4-route-reference)
-4b. [**The MCP server — sourcing and enrichment**](#4b-the-mcp-server--sourcing-and-enrichment)
+4b. [**The MCP server: sourcing and enrichment**](#4b-the-mcp-server-sourcing-and-enrichment)
 5. [Building a table](#5-building-a-table)
 6. [Running columns](#6-running-columns)
 7. [Reading data back](#7-reading-data-back)
@@ -34,7 +34,7 @@ to be corrected and one incident that destroyed live data.
 11. [How to explore the API safely](#11-how-to-explore-the-api-safely)
 12. [Known limits and open questions](#12-known-limits-and-open-questions)
 
-Files here: `clay.py` (the client — import it, don't rewrite it) and `examples/` (runnable scripts).
+Files here: `clay.py` (the client, which you should import rather than rewrite) and `examples/` (runnable scripts).
 
 ---
 
@@ -50,19 +50,19 @@ python examples/01_explore.py
 | | |
 |---|---|
 | Base URL | `https://api.clay.com/v3` |
-| Auth header | `Authorization: <key>` — **raw** |
+| Auth header | `Authorization: <key>`: **raw** |
 | Not `Bearer <key>` | returns 403 |
 | Not `x-api-key` | returns 401 |
 
 The key acts **as the user who created it**. Writes appear under their name, and it inherits their
-permissions — so an API key is not a service account and should not be treated as one. Rotate it if it is
+permissions, so an API key is not a service account and should not be treated as one. Rotate it if it is
 ever pasted into a chat, a ticket, or a shared document.
 
 **Workspace discovery.** `GET /v3/my-workspaces` returns every workspace the key can see, with ids.
 `GET /me` does *not* include the workspace id and `GET /workspaces` is admin-only, so this is the route
 to use. (The id is also embedded in the permission rules at `GET /v3` → `auth.abilities`, which is a
 usable fallback.) `clay.py` handles both; pass `Clay(workspace=...)` if a key can see more than one.
-`GET /v3/workspaces/{ws}/users` lists the members — names and email addresses, so treat it as
+`GET /v3/workspaces/{ws}/users` lists the members, returning names and email addresses, so treat it as
 personal data.
 
 ---
@@ -74,7 +74,7 @@ workspace
 └── table  (t_...)          "spreadsheet" or "people"
     ├── fields (f_...)      the columns
     │     text | formula | action | date
-    ├── views  (gv_...)     saved filters — ALSO the only way to list rows
+    ├── views  (gv_...)     saved filters, and the only way to list rows
     └── records (r_...)     the rows; each holds cells keyed by field id
 ```
 
@@ -85,18 +85,18 @@ Ids are prefixed by type: `t_` table, `f_` field, `r_` record, `gv_` view, `aa_`
 
 | type | what it is | where the logic lives |
 |---|---|---|
-| `text` | a plain value | — |
+| `text` | a plain value |: |
 | `formula` | a computed cell, free, instant | `typeSettings.formulaText` |
 | `action` | an enrichment or AI call, **costs credits** | `typeSettings.inputsBinding` |
-| `date` | `Created At` / `Updated At`, automatic | — |
+| `date` | `Created At` / `Updated At`, automatic |: |
 
-**Formulas** are single JS *expressions* — no statements, no `const`. Use an arrow IIFE for locals:
+**Formulas** are single JS *expressions*: no statements, no `const`. Use an arrow IIFE for locals:
 
 ```js
 (s => s ? s.trim().toLowerCase() : "")({{f_abc123}})
 ```
 
-They reference other columns as `{{f_...}}` — **by id, never by name**. Resolve names via `field_map()` /
+They reference other columns as `{{f_...}}`, **by id and never by name**. Resolve names via `field_map()` /
 `id_map()`. A formula recomputes automatically and immediately; it never needs running.
 
 **Action columns** (AI, Claygent, and every third-party enrichment) keep their configuration in
@@ -107,7 +107,7 @@ literal prompt is a quoted string, and chips are concatenated in:
 "You are analysing " + Clay.formatForAIPrompt({{f_company}}) + ". Reply with JSON."
 ```
 
-That means reading a prompt back requires parsing the concatenation — see
+That means reading a prompt back requires parsing the concatenation. See
 `examples/05_export_config.py`.
 
 ---
@@ -119,25 +119,25 @@ to diagnose; #6 and #7 together destroyed live customer-facing data.
 
 | # | Failure | What you see | Defence |
 |---|---|---|---|
-| 1 | A setting Clay won't accept is **dropped** | 200, then the key isn't there on read-back | `verify_field()` — assert after every write |
+| 1 | A setting Clay won't accept is **dropped** | 200, then the key isn't there on read-back | `verify_field()`: assert after every write |
 | 2 | `runRecords` in the wrong shape | 200 with `{"runMode":"NONE"}`; nothing ran | `run()` raises on `NONE` |
-| 3 | An **AI column with no `model`** | Column looks perfect, never executes — ever | Clone a working column; never hand-assemble |
+| 3 | An **AI column with no `model`** | Column looks perfect, never executes: ever | Clone a working column; never hand-assemble |
 | 4 | A run condition on a **formula** column | 200, the gate silently vanishes | Gates only work on `action` columns |
 | 5 | `POST /tables/{t}/records/{anything}` | 200 that **creates or blanks** a record | It's an upsert. Only ever `GET` to read |
 | 6 | Column on an **auth account with no credentials** | `ERROR_INVALID_CREDENTIALS` *in the cell*, not in the response | `preflight()` before every run |
 | 7 | **`forceRun` clears the cell before running** | Run fails ⇒ the old value is gone, no undo | Preflight, then test on ONE row |
-| 8 | **Non-ASCII in a prompt literal** | Column created, preflights clean, dispatches — and never runs | Build prompts with `prompt_literal()` |
-| 9 | A gate comparing a **formula column to a boolean** | Gate never matches; column silently skipped | Formula columns are STRINGS — use `truthy()` |
+| 8 | **Non-ASCII in a prompt literal** | Column created, preflights clean, dispatches, and never runs | Build prompts with `prompt_literal()` |
+| 9 | A gate comparing a **formula column to a boolean** | Gate never matches; column silently skipped | Formula columns are STRINGS: use `truthy()` |
 | 10 | **`offset` on the records endpoint** | Every page returns the same rows; paging loops never end | Raise `limit` instead; `offset` does nothing |
 
-### #8 — the one that cost the most time
+### #8: the one that cost the most time
 
 An AI column built through the API can be **perfect in every observable way and still never execute**:
 created successfully, correct `actionKey` / `model` / `authAccountId`, `preflight()` clean, `run()` returns
-`{"runMode":"INDIVIDUAL"}` — and the cell just sits there with `trigger: FORCE-RUN` and no status, forever.
+`{"runMode":"INDIVIDUAL"}`, and the cell just sits there with `trigger: FORCE-RUN` and no status, forever.
 
 The tell is **`inputFieldIds`**. Clay derives that list server-side, at create time, by parsing the prompt for
-chip references. It is the column's dependency graph. If it comes back `None`, the column will never run —
+chip references. It is the column's dependency graph. If it comes back `None`, the column will never run: 
 and you cannot repair it: `PATCH`ing `inputFieldIds` is accepted and silently ignored (failure #1 again).
 
 What breaks the parse is **any non-ASCII character in the prompt literal**. Binary-searched to the exact
@@ -154,7 +154,7 @@ json.dumps(text, ensure_ascii=False)  # raw UTF-8 -> works
 `Clay.prompt_literal(text, chips)` does it correctly, and `clone_column()` now raises if
 `inputFieldIds` comes back empty rather than handing you a column that will never run.
 
-### #9 — formula columns are strings
+### #9: formula columns are strings
 
 A formula column that evaluates to a boolean is stored and returned as the **string** `"true"` / `"false"`.
 So a run condition written the obvious way never matches, and the gated column is silently skipped with no
@@ -162,17 +162,17 @@ error anywhere:
 
 ```js
 {{f_qualified}} === true                        // never matches
-String({{f_qualified}}).toLowerCase() === "true" // correct — Clay.truthy() emits this
+String({{f_qualified}}).toLowerCase() === "true" // correct: Clay.truthy() emits this
 ```
 
 The same coercion bites values arriving through a lookup: booleans may come back as booleans *or* as
 strings depending on the path they took. Compare defensively.
 
-### #6 and #7 — the incident, in full, because this is the expensive one
+### #6 and #7: the incident, in full, because this is the expensive one
 
 A new AI column is assigned a default "account". At least one such default carries **no model credentials**.
 The column is created successfully, reports correct settings through the API, and passes every structural
-check — then fails **at run time, inside the cell**, with `ERROR_INVALID_CREDENTIALS` and
+check, then fails **at run time, inside the cell**, with `ERROR_INVALID_CREDENTIALS` and
 *"API key is missing."* The HTTP response for the run is a cheerful `200 {"runMode": "INDIVIDUAL"}`.
 
 Now combine that with `forceRun`, which **empties a cell before regenerating it**. A batch re-run across
@@ -180,7 +180,7 @@ live rows wipes the existing values and then fails to replace them. In the incid
 
 - two columns sat on the wrong account; a batch re-run **blanked 27 rows** of finished, customer-facing copy
 - the pipeline's "ready to send" count fell from 245 to 218
-- **retrying made it worse** — every retry cleared more cells before failing
+- **retrying made it worse**: every retry cleared more cells before failing
 - diagnosis was slow because the failure is invisible from the API response; it only shows in cell metadata
 
 The fix took seconds once found: point the columns at the account that has credentials (UI dropdown, or
@@ -195,7 +195,7 @@ c.run_and_wait(table, col, ids[:1])    # then ONE row
 # inspect the result, and only then the batch
 ```
 
-`preflight()` scores every auth account by **actual cell outcomes** — successes versus credential failures,
+`preflight()` scores every auth account by **actual cell outcomes**: successes versus credential failures,
 grouped by action type, because accounts are provider-specific. It works in any workspace without knowing
 account ids in advance.
 
@@ -204,21 +204,21 @@ account ids in advance.
 | status | meaning |
 |---|---|
 | `SUCCESS` | ran and produced a value |
-| `ERROR_INVALID_CREDENTIALS` | the account has no working key — see above |
-| `ERROR_BLANK_TOKEN` | a **required input chip is blank**, so the row can never run — see `optional=` on `clone_column()` |
+| `ERROR_INVALID_CREDENTIALS` | the account has no working key: see above |
+| `ERROR_BLANK_TOKEN` | a **required input chip is blank**, so the row can never run: see `optional=` on `clone_column()` |
 | `ERROR_RUN_CONDITION_NOT_MET` | the gate correctly excluded this row. Not an error |
-| `isStale` + `staleReason` | e.g. `TABLE_AUTO_RUN_OFF` — the cell is out of date and nothing will refresh it automatically |
+| `isStale` + `staleReason` | e.g. `TABLE_AUTO_RUN_OFF`: the cell is out of date and nothing will refresh it automatically |
 
-### Error dictionary — how to read Clay's refusals
+### Error dictionary: how to read Clay's refusals
 
 | response | meaning |
 |---|---|
 | `{"type":"NoMatchingURL"}` | **route + method** doesn't exist. Method-specific: `POST /run` is NoMatchingURL while `PATCH /run` works. Never conclude "impossible" from one verb |
-| `{"type":"BadRequest"}` + field errors | the route **exists**; your body is wrong. When probing this is a *success* — `details.bodyErrors.issues` names the exact expected types |
+| `{"type":"BadRequest"}` + field errors | the route **exists**; your body is wrong. When probing this is a *success*: `details.bodyErrors.issues` names the exact expected types |
 | `{"type":"NotFound","message":"Field f_x does not exist..."}` | route resolved, id wrong. The safe way to prove a route exists |
 | `{"type":"FieldNameAlreadyExists"}` | a retry after a partial failure |
 | `"Missing data type settings"` | `dataTypeSettings` omitted when creating a column |
-| `"Missing data type settings in type settings"` | you sent a **partial** `typeSettings` to PATCH — it replaces, never merges |
+| `"Missing data type settings in type settings"` | you sent a **partial** `typeSettings` to PATCH: it replaces, never merges |
 | `"value" does not match any of the allowed types` | enum/shape rejection; start from a working column's shape |
 | `504 Gateway Timeout` | usually self-inflicted: polling per-record in a loop. Poll through a view instead |
 
@@ -230,23 +230,23 @@ Everything verified against a live workspace.
 
 | method | route | purpose |
 |---|---|---|
-| GET | `/v3` | identity envelope — **workspace id lives here** |
+| GET | `/v3` | identity envelope: **workspace id lives here** |
 | GET | `/me` | the acting user |
 | GET | `/workspaces/{ws}/tables` | list tables |
 | GET | `/tables/{t}` | **the whole table**: settings, all field definitions, views |
 | POST | `/tables` | create a table (requires `workspaceId`) |
-| PATCH | `/tables/{t}` | table settings — auto-run lives here |
+| PATCH | `/tables/{t}` | table settings: auto-run lives here |
 | DELETE | `/tables/{t}` | delete a table |
 | POST | `/tables/{t}/fields` | create a column |
-| PATCH | `/tables/{t}/fields/{f}` | **edit a column** — prompt, formula, run condition, account |
+| PATCH | `/tables/{t}/fields/{f}` | **edit a column**: prompt, formula, run condition, account |
 | GET | `/tables/{t}/views/{v}` | one view, including its filter tree |
 | POST | `/tables/{t}/views` | create a view (requires `name`) |
 | PATCH | `/tables/{t}/views/{v}` | edit a view / its filter |
-| GET | `/tables/{t}/views/{v}/records` | **list rows** — `?limit=&offset=`, default page 100 |
+| GET | `/tables/{t}/views/{v}/records` | **list rows**: `?limit=&offset=`, default page 100 |
 | GET | `/tables/{t}/records/{r}` | read one record |
 | POST | `/tables/{t}/records` | insert rows; returns them with computed cells |
 | PATCH | `/tables/{t}/records` | update rows |
-| PATCH | `/tables/{t}/run` | **run columns** — body shape matters, see §6 |
+| PATCH | `/tables/{t}/run` | **run columns**: body shape matters, see §6 |
 | GET | `/actions?workspaceId={ws}` | provider registry (thousands of entries, tens of MB) |
 | GET | `/sources?workspaceId={ws}` | sources; also accepts `?tableId=` |
 | GET | `/workbooks/{wb}/tables` | tables in a workbook |
@@ -257,38 +257,38 @@ Everything verified against a live workspace.
 
 ---
 
-## 4b. The MCP server — sourcing and enrichment
+## 4b. The MCP server: sourcing and enrichment
 
 **This is where finding new companies and people happens.** It is a *different product surface* from the REST
 API: conversational, credit-metered, and built around Clay's own database rather than around your tables.
 
 Connect it in the AI client (Clay's own page positions it for "ChatGPT, Codex or Claude"); it authenticates
-through the workspace connection, not the REST API key. There is no HTTP contract to hand-roll — the tools
+through the workspace connection, not the REST API key. There is no HTTP contract to hand-roll: the tools
 arrive in the assistant's tool list.
 
 ### What it does that the REST API cannot
 
 | tool | purpose |
 |---|---|
-| `find-and-enrich-contacts-at-company` | **search people by criteria at a company** — the main sourcing tool |
+| `find-and-enrich-contacts-at-company` | **search people by criteria at a company**: the main sourcing tool |
 | `find-and-enrich-list-of-contacts` | resolve specific *named* people to profiles |
 | `find-and-enrich-company` | look up / research one company |
 | `add-company-data-points` / `add-contact-data-points` | enrich an existing search (**costs credits**) |
-| `query-objects` / `ask-question-about-accounts` | your OWN CRM/account data — not prospecting |
+| `query-objects` / `ask-question-about-accounts` | your OWN CRM/account data, not prospecting |
 | `list_subroutines` / `run_subroutine` | workspace-defined Functions (lead scoring, account prep) |
 | `get-task` / `get-task-context` | re-read a prior search instead of re-running it |
 | `get-credits-available` / `get-current-workspace` | account state |
 
 ### People search filters
 
-`find-and-enrich-contacts-at-company` accepts a rich filter set — this is the real ICP surface:
+`find-and-enrich-contacts-at-company` accepts a rich filter set: this is the real ICP surface:
 
 `job_title_keywords`, `job_title_exclude_keywords`, `names`, `profile_keywords` (anything in the profile),
 `certification_keywords`, `languages`, `school_names`, `locations`, `locations_exclude`,
 `current_role_min_months_since_start_date`, `current_role_max_months_since_start_date` (new hires vs tenured).
 
 Filters combine with **AND**; values inside one array combine with **OR**. Keep compound titles as a single
-string — `["VP Finance"]`, not `["VP", "Finance"]` — and be specific: `"Software Engineer"` rather than
+string: `["VP Finance"]`, not `["VP", "Finance"]`, and be specific: `"Software Engineer"` rather than
 `"Engineer"`, which also matches Sales Engineer.
 
 ### What a search returns
@@ -304,7 +304,7 @@ string — `["VP Finance"]`, not `["VP", "Finance"]` — and be specific: `"Soft
 ```
 
 A verified example: searching one company for Product Managers in the United States returned **20 contacts**
-with names, titles, LinkedIn URLs, locations and role start dates, plus a full company record — with
+with names, titles, LinkedIn URLs, locations and role start dates, plus a full company record, with
 `enrichments: []` and **no credits spent**, because no data points were requested.
 
 ### The credit rule that matters
@@ -321,16 +321,16 @@ Company data points: `Headcount Growth`, `Recent News`, `Investors`, `Company Co
 Both accept `{type: "Custom", ...}` for open-ended research.
 
 Enrich an existing search with `add-*-data-points` and its `taskId` (optionally `entityIds` for specific
-rows) — do **not** start a new search to enrich something you already found. Check `get-task-context` first
+rows): do **not** start a new search to enrich something you already found. Check `get-task-context` first
 in case the data is already there.
 
 ### Gotchas
 
 - **`companyIdentifier` must be a domain or LinkedIn company URL.** Bare company names fail. Convert
   confidently (`"Stripe"` → `"stripe.com"`), and ask when ambiguous (`"Delta"`).
-- **Person LinkedIn URLs are not company identifiers** — a common mix-up in `find-and-enrich-list-of-contacts`.
+- **Person LinkedIn URLs are not company identifiers**: a common mix-up in `find-and-enrich-list-of-contacts`.
 - **`query-objects` is not prospecting.** It queries your own synced CRM objects and returns nothing in a
-  workspace with no CRM connected — which reads exactly like "no results" if you mistake it for search.
+  workspace with no CRM connected, which reads exactly like "no results" if you mistake it for search.
 - **Re-call the tool to refine**, rather than filtering results in the conversation.
 - Results are paginated (`page`, `hasMore`).
 
@@ -370,7 +370,7 @@ typically starts in the MCP and lives in the REST API.
 from clay import Clay
 c = Clay()
 
-t     = c.create_table("Campaign — Companies")     # auto-run OFF by default here
+t     = c.create_table("Campaign: Companies")     # auto-run OFF by default here
 name  = c.add_text(t, "company")
 qual  = c.add_formula(t, "qualified", '(({{%s}}||"").length > 0)' % name)
 ```
@@ -388,7 +388,7 @@ fit = c.clone_column(t, "consumer_fit", src_table, "An AI Column That Works", bi
 })
 ```
 
-Cloning carries over `authAccountId`, `model`, `useCase`, `runBudget` and the rate-limit rules — precisely
+Cloning carries over `authAccountId`, `model`, `useCase`, `runBudget` and the rate-limit rules: precisely
 the settings whose absence causes silent non-execution.
 
 **Three things a clone gets wrong, and `clone_column()` now handles all three:**
@@ -396,7 +396,7 @@ the settings whose absence causes silent non-execution.
 1. **The source's run condition comes with it.** Stripped, so you never inherit another column's gate.
 2. **`optionalPathsInInputs` still points at the SOURCE table's field ids.** Those mean nothing in the new
    table, so every chip is effectively required, and any row with one blank chip dies with
-   `ERROR_BLANK_TOKEN`. On a real run this was 136 of 250 rows. Pass `optional=[field_ids]` — mark every
+   `ERROR_BLANK_TOKEN`. On a real run this was 136 of 250 rows. Pass `optional=[field_ids]`: mark every
    chip optional except the one or two the prompt genuinely cannot work without.
 3. **`inputFieldIds` may come back empty** (failure #8), which means the column will never run. It now
    raises instead of returning a dead column.
@@ -416,7 +416,7 @@ one row, then clone that from then on. This is faster than deriving the required
 `GET /actions?workspaceId=` lists every provider with its `inputParameterSchema` if you need to construct one
 from scratch (`c.actions(contains="email")`).
 
-### Run conditions — gate anything that costs money
+### Run conditions: gate anything that costs money
 
 A column with no run condition **runs on every row**. On action columns that is a direct bill.
 
@@ -427,7 +427,7 @@ c.set_run_condition(t, fit,
 ```
 
 The gate is a JS expression in `typeSettings.conditionalRunFormulaText`, with an optional plain-English
-`conditionalRunFormulaPrompt` shown in the UI. `conditionalRunFieldIds` is **derived** by Clay — read it,
+`conditionalRunFormulaPrompt` shown in the UI. `conditionalRunFieldIds` is **derived** by Clay: read it,
 never write it.
 
 Audit gates with `run_condition_of()`; `None` means ungated. In the workspace this playbook came from,
@@ -457,7 +457,7 @@ PATCH /v3/tables/{tableId}/run
 
 The response is a `runMode`. **`runRecords` is the whole trick**: real ids give
 `{"runMode":"INDIVIDUAL"}`; `{}`, `{"all":true}`, `{"ids":[...]}`, or an empty list all give
-`{"runMode":"NONE"}` — a 200 that did nothing. `clay.py` raises on `NONE`.
+`{"runMode":"NONE"}`: a 200 that did nothing. `clay.py` raises on `NONE`.
 
 There is **no per-field run route** and **no "run everything" mode**. You must enumerate the rows you want.
 
@@ -471,11 +471,11 @@ print(c.statuses(t, "consumer_fit"))
 ```
 
 **`forceRun=True` re-runs cells that already have values and clears them first.** Use `False` to fill only
-blanks — much safer for a retry.
+blanks: much safer for a retry.
 
 **Batches are far faster than single rows.** Clay reports `runMode` as `INDIVIDUAL` for small sets and
 `BULK` for large ones, and BULK is dramatically more efficient: 437 AI cells finished in about 20 seconds,
-while the same column on one row took 5 minutes end to end. Do not pace your polling off a single-row test —
+while the same column on one row took 5 minutes end to end. Do not pace your polling off a single-row test: 
 fire the batch and check back in two or three minutes.
 
 **Per-cell cost is not reported, but account-level pricing and credits are.** A cell's `metadata`
@@ -496,13 +496,13 @@ cost = c.model_costs()["claude-sonnet-5"] * c.count(table)   # credits, before y
 ```
 
 `model_costs()` returns ~47 models with their per-call credit cost, and they differ by an order of
-magnitude — choosing the model is a real cost lever, not a detail.
+magnitude: choosing the model is a real cost lever, not a detail.
 
 **Polling: never per record.** Reading each cell individually in a loop earns a `504` from Clay's edge once
 the batch is more than a handful of rows.
 
 The cheapest way to watch a run is **`GET /v3/workspaces/{ws}/tables/{t}/fields/runstatus`**, which returns
-status counts for *every field in the table* in a single request — no records fetched at all. `wait()` polls
+status counts for *every field in the table* in a single request: no records fetched at all. `wait()` polls
 through the view; `run_status()` is the lighter option when you only need to know whether a batch has
 settled.
 
@@ -511,7 +511,7 @@ Lookup columns are **snapshots**: changing a source table does nothing downstrea
 re-run. A correct chain is: source table → lookup refresh → dependent columns, in that order, each waited
 on before the next.
 
-**Expect a few percent of AI cells to fail per batch** — typically JSON that arrives as a raw string, so the
+**Expect a few percent of AI cells to fail per batch**, typically JSON that arrives as a raw string, so the
 parent cell holds text while extracted sub-fields stay blank. Re-running usually fixes it. Occasionally a row
 never recovers: cap your retries, exclude it, and note it, rather than burning credits on convergence that
 isn't coming. Adding *"Return ONLY the raw JSON object. No code fences."* to the prompt reduces the rate.
@@ -520,7 +520,7 @@ isn't coming. Adding *"Return ONLY the raw JSON object. No code fences."* to the
 
 ## 7. Reading data back
 
-**Rows are enumerated through a view — there is no records-listing route.**
+**Rows are enumerated through a view: there is no records-listing route.**
 
 ```python
 rows = c.rows(t)                       # [{'_id': 'r_...', 'column name': value, ...}]
@@ -528,11 +528,11 @@ recs = c.records(t, limit=1000)        # raw form, with per-cell metadata/status
 one  = c.read(t, "r_abc")              # a single record
 ```
 
-- Server default page size is **100** — always pass `limit`.
+- Server default page size is **100**, always pass `limit`.
 - Page with `offset` beyond 1000.
 - Every table normally has an **`All rows`** view; `rows()` uses it by default. Pass a view name to read a
   filtered subset (`c.rows(t, view="Errored rows")`).
-- View filters support types like `HAS_ERROR`, `RUN_CONDITION_NOT_MET`, `NO_RESULTS`, `EMPTY` — server-side
+- View filters support types like `HAS_ERROR`, `RUN_CONDITION_NOT_MET`, `NO_RESULTS`, `EMPTY`: server-side
   filtering if a table is too big to filter locally.
 
 Cell metadata is where truth lives: `cells[field_id].metadata.status` tells you whether a value is real, a
@@ -551,7 +551,7 @@ in place. Both mean your repository copy silently stops matching production.
 In the workspace this came from, a prompt file in the repo was a 1.4k stub while the live column held a 4.1k
 rewritten version. Nobody knew until it was diffed.
 
-**Keep files as the source of truth, and verify it** — don't assume:
+**Keep files as the source of truth, and verify it**: don't assume:
 
 ```bash
 python examples/05_export_config.py   # pull live prompts/formulas into files
@@ -562,8 +562,8 @@ Normalisation matters when diffing:
 
 - **Prompts** are stored as a JS concatenation, and the UI flattens newlines. Collapse whitespace runs before
   comparing, and reconstruct chips as readable `{{Column Name}}`.
-- **Formulas** are minified by Clay (`s=>s?s:""` vs your `s => s ? s : ""`). Strip whitespace entirely — it's
-  insignificant in JS — or every re-paste looks like a change.
+- **Formulas** are minified by Clay (`s=>s?s:""` vs your `s => s ? s : ""`). Strip whitespace entirely: it's
+  insignificant in JS, or every re-paste looks like a change.
 - Strip your own header comments from files; they never go into Clay.
 
 Run the drift check at the start of any session that touches an existing table.
@@ -575,20 +575,20 @@ Run the drift check at the start of any session that touches an existing table.
 Formulas and reads are free. **Action columns cost credits per cell.** The controls, in order of importance:
 
 1. **Turn auto-run OFF.** It's table-level (`AUTO_RUN_ON`) and Clay defaults it **on**. With it on, paid
-   columns fire whenever rows land or a column changes — including as a side effect of an API edit.
+   columns fire whenever rows land or a column changes, including as a side effect of an API edit.
    `create_table()` here defaults it off.
 2. **Gate every paid column** with a run condition (§5).
 3. **Filter and enumerate, then run on that list.** Don't rely on a gate as a budget: gates protect against
    stray single-row runs, they don't stop you dispatching 400 rows by mistake.
-4. **Iterate on 5–10 rows**, including deliberate edge cases, before running the full set.
+4. **Iterate on 5-10 rows**, including deliberate edge cases, before running the full set.
 5. **Order paid columns cheapest-first.** A free formula and a cheap classifier can cut the population
-   before an expensive web-research column ever sees it — in the source workspace, two cheap gates cut
+   before an expensive web-research column ever sees it: in the source workspace, two cheap gates cut
    394 rows to 157 before the expensive column ran.
 6. **Audit periodically** (`examples/04_audit.py`): which tables have auto-run on, and which paid columns
    are ungated. The dangerous combination is both at once.
 
 Web-research columns are non-deterministic: re-running the same row yields different findings. Never re-run
-research "to be safe" — you may lose a good result.
+research "to be safe": you may lose a good result.
 
 ---
 
@@ -598,22 +598,22 @@ The shape that works, end to end:
 
 ```
 1. SOURCE      via the Clay MCP (§4b) or an external tool; then insert() the results into a table
-2. GATE        cheap formulas first — free, and they shrink everything downstream
+2. GATE        cheap formulas first: free, and they shrink everything downstream
 3. CLASSIFY    a cheap AI column, gated on the formula, to drop non-ICP rows
 4. ENRICH      expensive research, gated on the classifier
 5. GENERATE    output columns, gated on persona/segment + the gates above
 6. QA          enumerate rows, check the output in Python, collect failing ids
-7. RE-RUN      only the failures — then re-QA. Repeat until it converges or plateaus
+7. RE-RUN      only the failures, then re-QA. Repeat until it converges or plateaus
 8. EXPORT      filter to the ready set, write a CSV for the downstream tool
 ```
 
 Notes from doing this in anger:
 
-- **Steps 6–7 are a loop, and it plateaus.** Most defects clear in one or two passes; a small tail never
+- **Steps 6-7 are a loop, and it plateaus.** Most defects clear in one or two passes; a small tail never
   converges because the prompt itself causes it. Recognise the plateau, flag those rows, move on.
-- **Put a QA flag in the export** rather than silently dropping rows — let the human decide.
+- **Put a QA flag in the export** rather than silently dropping rows: let the human decide.
 - **Cap output per company/account** if you're contacting several people at one organisation. Prompts keyed
-  on company + segment produce near-identical text for two people at the same company with the same role —
+  on company + segment produce near-identical text for two people at the same company with the same role: 
   visible and embarrassing if colleagues compare. Deduplicate on (company, segment).
 - **Keep a stable join key** (a slug formula) so downstream replies can be matched back. Normalise accents.
 - **Re-QA from live data, not yesterday's export.** They diverge the moment anyone edits anything.
@@ -625,20 +625,20 @@ Notes from doing this in anger:
 There is no documentation, so mapping is part of the work. What works:
 
 1. **Guess the noun, then try every method.** Route matching is method-specific. A whole capability was
-   wrongly written off as impossible because only `POST` was tried on the right path — it needed `PATCH`.
+   wrongly written off as impossible because only `POST` was tried on the right path: it needed `PATCH`.
 2. **Read the validation errors.** `details.bodyErrors.issues` is the API describing its own schema. The
    run-endpoint body shape was reverse-engineered entirely from those messages.
 3. **Probe with ids that cannot exist.** `PATCH /tables/{real}/fields/f_FAKE` proves a route resolves
    (typed `NotFound`) while being incapable of changing anything.
 4. **Do all shape-finding on a throwaway table.** Create it, learn on it, delete it. Never on live data.
-5. **Search the web first.** One key route came from a third-party blog post, not from probing — though its
+5. **Search the web first.** One key route came from a third-party blog post, not from probing, though its
    documented body shape was wrong and still needed experiment.
 
 ### What not to do
 
 **Never send a destructive method to a live table as a probe.** During this mapping a `DELETE` was fired at
-a production table's `/fields` route to see what would happen. It returned `200` and happened to be a no-op —
-verified immediately afterwards — but that was luck. Destructive verbs belong on scratch tables only.
+a production table's `/fields` route to see what would happen. It returned `200` and happened to be a no-op: 
+verified immediately afterwards, but that was luck. Destructive verbs belong on scratch tables only.
 
 Related: probing `POST /tables/{t}/records/bulk|query|list` looks like endpoint discovery but is actually
 `/records/{recordId}` **upserting**, which creates junk records literally named `bulk`, `query` and `list`.
@@ -650,25 +650,25 @@ If you ever see records with names like that, this is where they came from.
 
 **Confirmed limits**
 
-- **The REST API does not source.** It builds and runs tables. Sourcing is the MCP's job (§4b) — or an
+- **The REST API does not source.** It builds and runs tables. Sourcing is the MCP's job (§4b), or an
   external tool. Either way the results reach a table through `insert()`.
 - **No bulk "run all".** You must enumerate record ids.
 - **No records-listing route.** Enumeration is view-scoped (this is fine, just not obvious).
 - **Rows over 1000** need `offset` paging; untested at very large scale.
 
-**Unexplored — worth investigating if you need them**
+**Unexplored: worth investigating if you need them**
 
 - **Webhook sources.** `GET /sources?workspaceId=` lists them; creating an inbound webhook source was never
   attempted. This is the pattern Clay's own docs describe for continuous programmatic row entry, and it may
   run enrichments on arrival.
-- **Server-side filtered views** via `POST /tables/{t}/views` — create a view for "errored rows" and read
+- **Server-side filtered views** via `POST /tables/{t}/views`: create a view for "errored rows" and read
   only those, instead of filtering locally.
 - **Running Claygent (web-research) columns via the API.** Standard AI columns are proven to execute; the
   research variant is proven only to be *creatable*. Verify before depending on it.
 - **`workbookId`** appears on every table and is barely explored beyond `/workbooks/{wb}/tables`.
 
 - **MCP ↔ REST are not joined.** An MCP search returns `taskId` / `entityId`; a table holds `t_` / `r_` ids.
-  Nothing links them automatically — you carry the results across yourself.
+  Nothing links them automatically: you carry the results across yourself.
 
 **A closing warning.** This API is undocumented and can change without notice. Everything here was true when
 tested against a live workspace. Re-verify anything load-bearing before trusting it in production, and treat

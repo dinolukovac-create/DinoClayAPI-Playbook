@@ -2,7 +2,7 @@
 """Portable Clay REST client. Company-agnostic: discovers the workspace and auth accounts itself.
 
 Clay has no public API documentation. Everything here was established by probing the live API and is
-verified working. Read README.md before extending it — especially the silent-failure section, because
+verified working. Read README.md before extending it, especially the silent-failure section, because
 Clay's characteristic failure is a 200 that quietly did less than you asked.
 
     from clay import Clay
@@ -49,7 +49,7 @@ class Clay(object):
     def call(self, method, path, body=None, timeout=90):
         """Raw call.
 
-        Auth is the bare key. NOT 'Bearer <key>' (403) and NOT an x-api-key header (401) — this trips
+        Auth is the bare key. NOT 'Bearer <key>' (403) and NOT an x-api-key header (401): this trips
         up everyone who assumes a conventional REST API.
         """
         req = urllib.request.Request(
@@ -65,18 +65,18 @@ class Clay(object):
         return self.call("GET", "/me")
 
     def workspaces(self):
-        """Every workspace this key can see. `GET /v3/my-workspaces` — the direct route."""
+        """Every workspace this key can see. `GET /v3/my-workspaces`: the direct route."""
         return self.call("GET", "/my-workspaces").get("results") or []
 
     def users(self, workspace=None):
-        """Members of a workspace. Returns names and email addresses — treat as personal data."""
+        """Members of a workspace. Returns names and email addresses: treat as personal data."""
         return self.call("GET", "/workspaces/%s/users" % (workspace or self.workspace)).get("users") or []
 
     def discover_workspace(self):
         """The workspace id.
 
         `GET /v3/my-workspaces` answers this directly. `GET /me` does not include it and
-        `GET /workspaces` is admin-only. If the key can see several, this returns the first —
+        `GET /workspaces` is admin-only. If the key can see several, this returns the first: 
         pass `workspace=` explicitly to pin one.
 
         Falls back to parsing the permission rules in the identity envelope at `GET /v3`, which also
@@ -114,13 +114,13 @@ class Clay(object):
     def table(self, table_id):
         """The whole table in one call: settings, every field definition, and views.
 
-        There is no /tables/{t}/fields route — this IS how you read columns. Expect a large response
+        There is no /tables/{t}/fields route: this IS how you read columns. Expect a large response
         on a wide table (100KB+ is normal).
         """
         return self.call("GET", "/tables/%s" % table_id)["table"]
 
     def create_table(self, name, auto_run=False):
-        """Create a table. auto_run defaults to False here on purpose — see set_auto_run."""
+        """Create a table. auto_run defaults to False here on purpose: see set_auto_run."""
         t = self.call("POST", "/tables", {"name": name, "workspaceId": self.workspace,
                                           "type": "spreadsheet"})["table"]["id"]
         if not auto_run:
@@ -182,7 +182,7 @@ class Clay(object):
         whole row with ERROR_BLANK_TOKEN when a required chip is empty, and the cloned
         optionalPathsInInputs still points at the SOURCE table's field ids, which do nothing here.
 
-        Raises if Clay fails to derive `inputFieldIds` — a column with none never runs (see
+        Raises if Clay fails to derive `inputFieldIds`: a column with none never runs (see
         prompt_literal / README section 3).
         """
         src = [f for f in self.fields(source_table) if f["name"] == source_column]
@@ -273,7 +273,7 @@ class Clay(object):
     def set_run_condition(self, table_id, field_id, formula, description=""):
         """Gate an ACTION column so it only runs on matching rows.
 
-        Formula columns silently ignore run conditions — the setting vanishes and update_field raises.
+        Formula columns silently ignore run conditions: the setting vanishes and update_field raises.
         """
         return self.update_field(table_id, field_id,
                                  conditionalRunFormulaText=formula,
@@ -293,7 +293,7 @@ class Clay(object):
         return {v["name"]: v["id"] for v in self.table(table_id)["views"]}
 
     def records(self, table_id, view=None, limit=1000, offset=0):
-        """List records THROUGH A VIEW — the only enumeration route that exists.
+        """List records THROUGH A VIEW: the only enumeration route that exists.
 
         There is no /tables/{t}/records listing. The server default page size is 100, so always pass
         `limit`. Page with `offset` for tables over 1000 rows.
@@ -470,14 +470,14 @@ class Clay(object):
                 best = self.best_account_for(key, scope)
                 if mine and mine["INVALID_CREDENTIALS"] and not mine["SUCCESS"]:
                     bad.append("%s: account %s only ever returns invalid-credentials%s"
-                               % (name, acct, (" — %s works" % best) if best else ""))
+                               % (name, acct, (": %s works" % best) if best else ""))
                 elif mine is None and best and acct != best:
                     bad.append("%s: account %s has no track record; %s is the proven one for %s"
                                % (name, acct, best, key))
             if key in ("use-ai", "claygent") and not any(
                     b.get("name") == "model" and b.get("formulaText")
                     for b in ts.get("inputsBinding") or []):
-                bad.append("%s: no model bound — an AI column without a model never runs" % name)
+                bad.append("%s: no model bound: an AI column without a model never runs" % name)
         return bad
 
     # ---------- running
@@ -486,7 +486,7 @@ class Clay(object):
         """Run columns on specific records. Raises unless Clay reports it actually dispatched them.
 
         runRecords MUST be {"recordIds": [...]} with real ids. Every other shape returns
-        {"runMode": "NONE"} — a 200 that did nothing at all.
+        {"runMode": "NONE"}: a 200 that did nothing at all.
 
         force=True re-runs cells that already have a value, and CLEARS THEM FIRST. If the run then
         fails, the old value is gone; there is no undo. Preflight, then test on one row.
@@ -497,13 +497,13 @@ class Clay(object):
                       {"fieldIds": list(field_ids), "runRecords": {"recordIds": list(record_ids)},
                        "callerName": "api", "forceRun": bool(force)})
         if r.get("runMode") == "NONE":
-            raise ClayError("runMode NONE — nothing ran. Are those record ids real?")
+            raise ClayError("runMode NONE: nothing ran. Are those record ids real?")
         return r
 
     def wait(self, table_id, field_id, record_ids, timeout=600, interval=15):
         """Wait for a batch to settle. Polls through the view: ONE request per cycle.
 
-        Do not poll per record — reading each cell individually in a loop earns a 504 from Clay's edge
+        Do not poll per record: reading each cell individually in a loop earns a 504 from Clay's edge
         once the batch is more than a handful of rows.
         """
         want, deadline = set(record_ids), time.time() + timeout
@@ -563,7 +563,7 @@ class Clay(object):
     # ---------- registry
 
     def actions(self, contains=None):
-        """The enrichment/provider registry. Large (thousands of entries, tens of MB) — filter it.
+        """The enrichment/provider registry. Large (thousands of entries, tens of MB): filter it.
 
         Each entry carries inputParameterSchema, which is how you learn a provider's expected inputs.
         """

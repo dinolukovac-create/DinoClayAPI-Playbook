@@ -2,7 +2,7 @@
 """Bridge the two surfaces: take MCP search results and load them into a Clay table.
 
 The MCP (sourcing) and the REST API (tables) share no data model. An MCP search returns a taskId and
-entityIds; a table holds t_/r_ ids. Nothing joins them — you carry the results across, which is what this
+entityIds; a table holds t_/r_ ids. Nothing joins them: you carry the results across, which is what this
 does. See README section 4b.
 
 The MCP tools run inside the AI assistant, not in Python, so the flow is:

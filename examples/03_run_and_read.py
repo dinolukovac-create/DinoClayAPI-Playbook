@@ -33,7 +33,7 @@ cell = c.cell(t, blank[0], fid)
 print("  status:", (cell.get("metadata") or {}).get("status"))
 print("  value :", str(cell.get("value"))[:200])
 if (cell.get("metadata") or {}).get("status") != "SUCCESS":
-    sys.exit("first row did not succeed — stopping before the batch")
+    sys.exit("first row did not succeed: stopping before the batch")
 
 if len(blank) > 1:
     input("press enter to run the remaining %d rows... " % (len(blank) - 1))
