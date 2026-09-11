@@ -64,21 +64,36 @@ class Clay(object):
     def whoami(self):
         return self.call("GET", "/me")
 
-    def discover_workspace(self):
-        """Pull the workspace id out of the identity envelope at GET /v3.
+    def workspaces(self):
+        """Every workspace this key can see. `GET /v3/my-workspaces` — the direct route."""
+        return self.call("GET", "/my-workspaces").get("results") or []
 
-        /me does NOT include it, and GET /workspaces is admin-only. The id is buried in the permission
-        rules instead. If an account can see several, this returns the first — pass `workspace=` explicitly.
+    def users(self, workspace=None):
+        """Members of a workspace. Returns names and email addresses — treat as personal data."""
+        return self.call("GET", "/workspaces/%s/users" % (workspace or self.workspace)).get("users") or []
+
+    def discover_workspace(self):
+        """The workspace id.
+
+        `GET /v3/my-workspaces` answers this directly. `GET /me` does not include it and
+        `GET /workspaces` is admin-only. If the key can see several, this returns the first —
+        pass `workspace=` explicitly to pin one.
+
+        Falls back to parsing the permission rules in the identity envelope at `GET /v3`, which also
+        carry the id, for the case where the workspace list is unavailable.
         """
+        try:
+            ws = self.call("GET", "/my-workspaces").get("results") or []
+            if ws:
+                return ws[0]["id"]
+        except ClayError:
+            pass
         root = self.call("GET", "")
-        ids = []
         for rule in ((root.get("auth") or {}).get("abilities") or {}).get("M") or []:
             wid = (rule.get("conditions") or {}).get("id")
-            if isinstance(wid, int) and wid not in ids:
-                ids.append(wid)
-        if not ids:
-            raise ClayError("Could not discover a workspace id; pass workspace=<id> yourself.")
-        return ids[0]
+            if isinstance(wid, int):
+                return wid
+        raise ClayError("Could not discover a workspace id; pass workspace=<id> yourself.")
 
     # ---------- tables
 
@@ -303,6 +318,57 @@ class Clay(object):
             out.append(row)
         return out
 
+    def count(self, table_id):
+        """Row count without fetching any rows. Cheap, and the honest way to size a table."""
+        return self.call("GET", "/tables/%s/count" % table_id).get("tableTotalRecordsCount")
+
+    def record_ids(self, table_id, view=None, limit=5000):
+        """Just the record ids for a view. Much cheaper than pulling whole records when all you need
+        is something to pass to run()."""
+        vs = self.views(table_id)
+        vid = view or vs.get("All rows") or (list(vs.values())[0] if vs else None)
+        if vid and not vid.startswith("gv_"):
+            vid = vs[vid]
+        return self.call("GET", "/tables/%s/views/%s/records/ids?limit=%d"
+                         % (table_id, vid, limit)).get("results") or []
+
+    def schema(self, table_id, view=None):
+        """Field id -> type/name/children for a view, in one call."""
+        vs = self.views(table_id)
+        vid = view or vs.get("All rows") or (list(vs.values())[0] if vs else None)
+        if vid and not vid.startswith("gv_"):
+            vid = vs[vid]
+        return self.call("GET", "/tables/%s/views/%s/table-schema-v2"
+                         % (table_id, vid)).get("tableSchema") or {}
+
+    def export(self, table_id, view=None, wait=True, timeout=300):
+        """Export a whole table or view to CSV and return the job, including a download URL.
+
+        This is the route for tables larger than a comfortable `limit`, and the only one that is not
+        bounded by the listing page size. `POST` starts a job; the job reports FINISHED with a
+        time-limited `downloadUrl` (it carries an `expiresAt`, so fetch it promptly).
+        """
+        path = "/tables/%s/export" % table_id
+        if view:
+            vs = self.views(table_id)
+            vid = view if view.startswith("gv_") else vs[view]
+            path = "/tables/%s/views/%s/export" % (table_id, vid)
+        job = self.call("POST", path, {})
+        if not wait:
+            return job
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            j = self.call("GET", "/exports/%s" % job["id"])
+            if (j.get("status") or "").upper() in ("FINISHED", "FAILED", "ERROR"):
+                return j
+            time.sleep(3)
+        return self.call("GET", "/exports/%s" % job["id"])
+
+    def bulk_records(self, table_id, record_ids):
+        """Fetch specific records by id in one call, rather than one request each."""
+        return self.call("POST", "/tables/%s/bulk-fetch-records" % table_id,
+                         {"recordIds": list(record_ids)})
+
     def insert(self, table_id, rows):
         """rows: [{field_id: value}, ...]. Returns new record ids, and computes formulas immediately.
 
@@ -455,6 +521,15 @@ class Clay(object):
         self.run(table_id, [field_id], record_ids, force=force)
         return self.wait(table_id, field_id, record_ids, timeout=timeout)
 
+    def run_status(self, table_id, workspace=None):
+        """Per-field run-status counts for a whole table, in ONE request.
+
+        Far cheaper than reading every cell to work out whether a batch has settled, and it is the
+        right way to poll a long run. Returns {field_id: [{status, count}, ...]}.
+        """
+        return self.call("GET", "/workspaces/%s/tables/%s/fields/runstatus"
+                         % (workspace or self.workspace, table_id)).get("statusCountsByField") or {}
+
     def statuses(self, table_id, field_name):
         """Tally cell outcomes for one column. The fastest way to see what actually happened."""
         fid = self.field_map(table_id)[field_name]
@@ -464,6 +539,26 @@ class Clay(object):
             if st:
                 out[st] = out.get(st, 0) + 1
         return out
+
+    # ---------- credits and pricing
+
+    def model_costs(self, workspace=None):
+        """Base credit cost per AI model. {model_name: credits}.
+
+        Combined with a row count this is how you estimate a run's cost BEFORE starting it.
+        """
+        r = self.call("GET", "/workspaces/%s/model-pricing/base-costs" % (workspace or self.workspace))
+        return {m["modelName"]: m.get("baseCostCredits") for m in r.get("baseCosts") or []}
+
+    def credit_accruals(self, workspace=None):
+        """Credit grants on the account: type, amount and period. The spend side of the ledger."""
+        return self.call("GET", "/credit-accrual?workspaceId=%s"
+                         % (workspace or self.workspace)).get("accruals") or []
+
+    def workbook_balance(self, workbook_id, workspace=None):
+        """Credit limit and remaining balance for one workbook, where a limit is set."""
+        return self.call("GET", "/workspaces/%s/credit-limits/workbook/%s/balance"
+                         % (workspace or self.workspace, workbook_id))
 
     # ---------- registry
 

@@ -58,9 +58,12 @@ The key acts **as the user who created it**. Writes appear under their name, and
 permissions — so an API key is not a service account and should not be treated as one. Rotate it if it is
 ever pasted into a chat, a ticket, or a shared document.
 
-**Workspace discovery.** `GET /me` does *not* include the workspace id, and `GET /workspaces` is admin-only.
-The id lives inside the permission rules at `GET /v3` → `auth.abilities`. `clay.py` extracts it
-automatically; pass `Clay(workspace=...)` if an account can see more than one.
+**Workspace discovery.** `GET /v3/my-workspaces` returns every workspace the key can see, with ids.
+`GET /me` does *not* include the workspace id and `GET /workspaces` is admin-only, so this is the route
+to use. (The id is also embedded in the permission rules at `GET /v3` → `auth.abilities`, which is a
+usable fallback.) `clay.py` handles both; pass `Clay(workspace=...)` if a key can see more than one.
+`GET /v3/workspaces/{ws}/users` lists the members — names and email addresses, so treat it as
+personal data.
 
 ---
 
@@ -475,14 +478,33 @@ blanks — much safer for a retry.
 while the same column on one row took 5 minutes end to end. Do not pace your polling off a single-row test —
 fire the batch and check back in two or three minutes.
 
-**The API will not tell you what anything cost.** Cell `metadata` carries `status` and `confidence` and
-nothing else; there are no credit or cost fields anywhere in the responses. Spend is only visible in the
-Clay UI, so a script cannot measure, cap or report its own consumption. Budget by counting rows before you
-run, and check the UI's usage banner.
+**Per-cell cost is not reported, but account-level pricing and credits are.** A cell's `metadata`
+carries `status` and `confidence` and nothing else, so you cannot read back what one row cost. The
+account ledger, however, is available:
+
+| route | what |
+|---|---|
+| `GET /v3/workspaces/{ws}/model-pricing/base-costs` | **base credit cost per AI model** |
+| `GET /v3/credit-accrual?workspaceId={ws}` | credit grants: type, amount, period |
+| `GET /v3/workspaces/{ws}/credit-limits/workbook/{wb}/balance` | a workbook's credit limit and balance |
+| `GET /v3/workspaces/{ws}/peopleSearchLimit` | the people-search ceiling |
+
+That is enough to **estimate a run before starting it**, which is the number that actually matters:
+
+```python
+cost = c.model_costs()["claude-sonnet-5"] * c.count(table)   # credits, before you spend any
+```
+
+`model_costs()` returns ~47 models with their per-call credit cost, and they differ by an order of
+magnitude — choosing the model is a real cost lever, not a detail.
 
 **Polling: never per record.** Reading each cell individually in a loop earns a `504` from Clay's edge once
-the batch is more than a handful of rows. `wait()` polls through the view — one request per cycle regardless
-of batch size.
+the batch is more than a handful of rows.
+
+The cheapest way to watch a run is **`GET /v3/workspaces/{ws}/tables/{t}/fields/runstatus`**, which returns
+status counts for *every field in the table* in a single request — no records fetched at all. `wait()` polls
+through the view; `run_status()` is the lighter option when you only need to know whether a batch has
+settled.
 
 **Dependency order matters.** If column B consumes column A's output, re-running A means re-running B.
 Lookup columns are **snapshots**: changing a source table does nothing downstream until the lookup is
