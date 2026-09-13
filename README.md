@@ -33,6 +33,7 @@ to be corrected and one incident that destroyed live data.
 10. [A complete worked workflow](#10-a-complete-worked-workflow)
 11. [How to explore the API safely](#11-how-to-explore-the-api-safely)
 12. [Known limits and open questions](#12-known-limits-and-open-questions)
+13. Auto-run, parking, and what actually triggers a run
 
 Files here: `clay.py` (the client, which you should import rather than rewrite) and `examples/` (runnable scripts).
 
@@ -506,7 +507,10 @@ status counts for *every field in the table* in a single request: no records fet
 through the view; `run_status()` is the lighter option when you only need to know whether a batch has
 settled.
 
-**Dependency order matters.** If column B consumes column A's output, re-running A means re-running B.
+**Dependency order matters, but only when auto-run is on.** If column B consumes column A's output,
+re-running A re-runs B **only if the table has `AUTO_RUN_ON: true`**. Measured on a two-column chain:
+with auto-run on, running A fired B on every row; with auto-run off, B did not fire at all. This is the
+single most useful safety fact in the API (§13).
 Lookup columns are **snapshots**: changing a source table does nothing downstream until the lookup is
 re-run. A correct chain is: source table → lookup refresh → dependent columns, in that order, each waited
 on before the next.
@@ -529,7 +533,12 @@ one  = c.read(t, "r_abc")              # a single record
 ```
 
 - Server default page size is **100**, always pass `limit`.
-- Page with `offset` beyond 1000.
+- ⚠️ **`offset` does not paginate.** It re-serves the first page. A loop that pages by offset
+  silently returns roughly one page per view and stops: on one table an offset loop returned
+  **1,268 rows for a table holding 7,093+**. The only working lever is a **high `limit`**.
+- **Very large tables cannot be enumerated exhaustively.** Raising the limit kept returning more
+  rows (4,650 → 5,032 → 6,716 → 7,093) and the read was *still* truncated at a limit of 12,000.
+  Compare rows-returned against the limit you asked for; if they are close, raise it and re-read.
 - Every table normally has an **`All rows`** view; `rows()` uses it by default. Pass a view name to read a
   filtered subset (`c.rows(t, view="Errored rows")`).
 - View filters support types like `HAS_ERROR`, `RUN_CONDITION_NOT_MET`, `NO_RESULTS`, `EMPTY`: server-side
@@ -646,6 +655,166 @@ If you ever see records with names like that, this is where they came from.
 
 ---
 
+---
+
+## 13. Auto-run, parking, and what actually triggers a run
+
+This section exists because getting it wrong is how an API session creates records, sends
+notifications, or bills for enrichment nobody asked for. Everything here was measured, not inferred.
+
+### 13.1 A config `PATCH` never runs anything
+
+The UI, when you edit a column, offers **"Save and run N rows"** or **"Save and don't run"**. Through
+the API there is no such prompt, because **saving never runs**. It is permanently "Save and don't run".
+
+Measured with `AUTO_RUN_ON: true`, which is the case where you would most expect a run:
+
+| Action | Cells that re-ran |
+|---|---|
+| `PATCH` the column's `conditionalRunFormulaText` (its run condition) | **0** |
+| `PATCH` the column's `inputsBinding` (a structural change) | **0** |
+| `POST .../run` on three rows | **3** |
+
+So the working pattern is **PATCH to save, then run explicitly on the row ids you choose**. That is
+finer control than the UI, which only offers a fixed sample or everything.
+
+> A run condition that references **its own column** is genuinely cyclical and is rejected
+> (`400 "Dag is cyclical"`). Reference a different column.
+
+### 13.2 `AUTO_RUN_ON: false` is the real safety switch
+
+Two mechanisms stop a column firing by itself, and they are not equivalent:
+
+| Mechanism | Scope |
+|---|---|
+| `typeSettings.runAsButton: true` ("parking") | that **one column** |
+| `tableSettings.AUTO_RUN_ON: false` | **every column on that table** |
+
+Measured on a chain where column B reads column A's output:
+
+| Setup | Run A explicitly → did B fire? |
+|---|---|
+| `AUTO_RUN_ON: true`, B not parked | **yes, every row** |
+| `AUTO_RUN_ON: false`, B not parked | **no, zero rows** |
+
+**Turning auto-run off makes parking redundant for automatic runs**, and it is one call per table
+instead of one per column. Three caveats that matter:
+
+1. **It protects only that table.** Tables that source from it have their own `AUTO_RUN_ON`. A
+   read-only lookup run on one table can wake a *different* table, which then runs its own paid
+   columns and write actions. Enumerate what references a table before touching it.
+2. **Parking still stops a human** clicking Run in the UI, and it survives someone switching auto-run
+   back on. Worth keeping on shared production tables even when auto-run is off.
+3. **Run conditions are enforced on explicit runs too.** A false gate yields
+   `ERROR_RUN_CONDITION_NOT_MET` and the action does not execute. That is the real protection;
+   parking only stops *automatic* runs.
+
+### 13.3 `AUTO_RUN_MODE`: the "keep existing results" choice is a stored setting
+
+Turning auto-run on in the UI asks whether to keep existing results. That answer is stored:
+
+```
+tableSettings.AUTO_RUN_MODE       = "keep_existing"
+tableSettings.AUTO_RUN_LAST_ENABLED = <epoch ms>
+```
+
+- `keep_existing` appears to be the **only value the field ever takes**, and it is the default: a
+  newly created table already has it.
+- **It cannot be removed.** `PATCH /tables/{id}` **merges** `tableSettings` rather than replacing it,
+  so omitting a key leaves it untouched. Useful: you cannot accidentally wipe dedupe settings by
+  sending a partial object.
+- **What it does:** with it set, switching auto-run on does **not** backfill cells that have never
+  run. Observed directly: a table enabled with `keep_existing` left dozens of never-run action cells
+  untouched.
+- ⚠️ A helper that sets auto-run usually writes **only `AUTO_RUN_ON`**. To mirror what the UI does,
+  PATCH the mode first, verify it, then flip `AUTO_RUN_ON` in a second call.
+
+**Before switching auto-run on, count never-run cells on that table's action columns.** That number
+is your exposure. A table can look idle and still be holding hundreds of rows ready to fire.
+
+### 13.4 `extendedContent` is per-record only
+
+`runId`, `finishedAt` and `inputsHash` live on a **single-record** read. A bulk records read **strips
+them**. A freshness check that looks for `finishedAt` in a bulk response is measuring nothing, and
+will report every row as stale forever.
+
+Two related traps when judging whether a batch has finished:
+
+- **Sample rows that have a value.** A completion check that only inspects populated cells reports
+  "nothing outstanding" on a table where every row was gated off and nothing ran at all.
+- **Census the statuses, not the values.** Count `SUCCESS`, `SUCCESS_NO_DATA`,
+  `ERROR_RUN_CONDITION_NOT_MET` and never-run separately. "Has a value" hides all three failure modes.
+
+### 13.5 `"Dag is cyclical"`, and why you cannot predict it
+
+Binding a column to another column that is computed **downstream of it** is refused:
+
+```
+400 {"type":"BadRequest","message":"Dag is cyclical",
+     "details":{"inputFieldIdsWithErrors":["f_..."]}}
+```
+
+⚠️ **A dependency graph built from the field config gives false negatives.** In one case a candidate
+column was cleared by a scan of `inputFieldIds`, `formulaText`, `inputsBinding` and
+`conditionalRunFormulaText`, and the change was still rejected: the chain ran through a formula column
+whose body was **not present** in the config the API returns.
+
+**So attempt the change and let the server adjudicate.** Make that safe by having your script restore
+the table on failure and exit with a distinct code, so a batch runner can skip and continue rather
+than abort halfway.
+
+### 13.6 Composing run conditions without destroying the existing rule
+
+Adding a guard to a column that already has business logic is the common case. Two rules:
+
+```js
+// keep the original verbatim, in parentheses
+NEW_GUARD && ( ORIGINAL_CONDITION )
+```
+
+- **`&&` binds tighter than `?:`.** An original containing a ternary **must** be parenthesised or its
+  meaning changes silently.
+- **Make it idempotent.** Peel any guard already present before applying one, or a second run nests
+  the guard inside itself and a third nests it again.
+- ⚠️ **Never rebuild a gate from a live column whose condition reads `None`.** "Preserve the original
+  and prepend a guard" then writes the guard *alone* and silently drops the business rule. The column
+  will look correctly gated in every check. Rebuild from a stored snapshot instead.
+
+### 13.7 Smaller things that cost time
+
+| | |
+|---|---|
+| `runAsButton` | `true` = parked. `false` **or the key absent** = live; the server normalises `false` to absent |
+| Gate values | conditions see the cell's **full structured value**, not the rendered grid string (which may be display text like `"Found 1 object(s)"`) |
+| `removeBlankValues: true` | **silently drops a blank filter clause**. A two-field match degrades to a one-field match with no error. Require both fields non-empty in the run condition |
+| Gated-off rows | a row whose condition is false has its **cell cleared** when run, even without force |
+| Duplicate table names | names are not unique in a workspace. Address tables by id |
+| `conditionalRunFormulaPrompt` | the human-readable line shown in the UI. It can be stale and is not what executes |
+| Column id shape | real ids look like `f_0` followed by ~18 alphanumerics. A naive `f_` grep also matches template tokens such as `f_company` |
+| Run attribution | **does not exist.** `/runs/{id}`, `/tables/{id}/runs`, `/activity`, `/history` and `/audit` all 404. You cannot determine from the API who queued a run |
+
+### 13.8 A safe-change recipe
+
+```
+1. blast radius  which tables reference this one?
+2. exposure      never-run cells on their action columns, especially create actions
+3. protect       AUTO_RUN_ON=false on the target AND on every table downstream of it
+4. snapshot      full table config to disk, before anything
+5. change        PATCH config. Nothing runs (13.1). Read it back and assert it stuck.
+6. run           only the read-only columns you intend, non-force, on ids you chose
+7. verify        census cell statuses (13.4), not just values
+8. measure       count SUCCESS cells on the TARGET's own write columns, before and after
+9. leave parked  restoring write access is a human decision, taken after reading the numbers
+10. restore      downstream tables back to their exact prior state, watched
+```
+
+**Judge a change by whether *that table's* write columns fired**, not by a system-wide record count:
+other live tables create records legitimately while you work, and a system-wide delta will make you
+halt for something that was never yours. And **check the sign**: a *negative* delta is a sampling
+artefact from a truncated read (§7), not a creation.
+
+---
+
 ## 12. Known limits and open questions
 
 **Confirmed limits**
@@ -654,7 +823,9 @@ If you ever see records with names like that, this is where they came from.
   external tool. Either way the results reach a table through `insert()`.
 - **No bulk "run all".** You must enumerate record ids.
 - **No records-listing route.** Enumeration is view-scoped (this is fine, just not obvious).
-- **Rows over 1000** need `offset` paging; untested at very large scale.
+- **`offset` is ignored** (§7). Paging is by `limit` only, and very large tables cannot be read
+  exhaustively at all. Any count taken from a truncated read is wrong, and if you then *run* the
+  rows you read, everything past the limit keeps stale values.
 
 **Unexplored: worth investigating if you need them**
 
