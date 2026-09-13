@@ -292,11 +292,18 @@ class Clay(object):
         """name -> view id. Tables normally ship with an 'All rows' view."""
         return {v["name"]: v["id"] for v in self.table(table_id)["views"]}
 
-    def records(self, table_id, view=None, limit=1000, offset=0):
+    def records(self, table_id, view=None, limit=5000, offset=0, verify=True):
         """List records THROUGH A VIEW: the only enumeration route that exists.
 
         There is no /tables/{t}/records listing. The server default page size is 100, so always pass
-        `limit`. Page with `offset` for tables over 1000 rows.
+        `limit`.
+
+        `offset` DOES NOT PAGINATE. It re-serves the first page, so an offset loop returns roughly one
+        page and stops. The only lever is a high `limit`, and even that truncates on very large tables.
+
+        Because a short read is silent, this checks the result against the table's real row count when
+        reading the unfiltered view and refuses to return a partial answer. Pass verify=False to accept
+        one deliberately, or use export() for a table too large to list.
         """
         vs = self.views(table_id)
         vid = view or vs.get("All rows") or (list(vs.values())[0] if vs else None)
@@ -304,10 +311,23 @@ class Clay(object):
             raise ClayError("table %s has no views to enumerate through" % table_id)
         if not vid.startswith("gv_"):
             vid = vs[vid]                                   # allow passing a view name
-        return self.call("GET", "/tables/%s/views/%s/records?limit=%d&offset=%d"
-                         % (table_id, vid, limit, offset)).get("results") or []
+        res = self.call("GET", "/tables/%s/views/%s/records?limit=%d&offset=%d"
+                        % (table_id, vid, limit, offset)).get("results") or []
+        if verify and vid == vs.get("All rows"):
+            try:
+                total = self.count(table_id)
+            except ClayError:
+                total = None
+            if isinstance(total, int) and len(res) < total:
+                raise ClayError(
+                    "read returned %d rows but the table holds %d: the listing is truncated. Raise "
+                    "`limit` and re-read, or use export() for a table this size. Any count taken from "
+                    "a truncated read is wrong, and running the ids you read leaves everything past "
+                    "the cut with stale values. Pass verify=False to accept a partial read."
+                    % (len(res), total))
+        return res
 
-    def rows(self, table_id, view=None, limit=1000):
+    def rows(self, table_id, view=None, limit=5000):
         """records() flattened to {column name: value} plus '_id'. The convenient form for filtering."""
         names = self.id_map(table_id)
         out = []

@@ -22,7 +22,7 @@ to be corrected and one incident that destroyed live data.
 
 1. [Setup and access](#1-setup-and-access)
 2. [The data model](#2-the-data-model)
-3. [**The seven silent failures**](#3-the-ten-silent-failures) ← read first
+3. [**The ten silent failures**](#3-the-ten-silent-failures) ← read first
 4. [Route reference](#4-route-reference)
 4b. [**The MCP server: sourcing and enrichment**](#4b-the-mcp-server-sourcing-and-enrichment)
 5. [Building a table](#5-building-a-table)
@@ -33,7 +33,7 @@ to be corrected and one incident that destroyed live data.
 10. [A complete worked workflow](#10-a-complete-worked-workflow)
 11. [How to explore the API safely](#11-how-to-explore-the-api-safely)
 12. [Known limits and open questions](#12-known-limits-and-open-questions)
-13. Auto-run, parking, and what actually triggers a run
+13. [Auto-run, parking, and what actually triggers a run](#13-auto-run-parking-and-what-actually-triggers-a-run)
 
 Files here: `clay.py` (the client, which you should import rather than rewrite) and `examples/` (runnable scripts).
 
@@ -537,8 +537,15 @@ one  = c.read(t, "r_abc")              # a single record
   silently returns roughly one page per view and stops: on one table an offset loop returned
   **1,268 rows for a table holding 7,093+**. The only working lever is a **high `limit`**.
 - **Very large tables cannot be enumerated exhaustively.** Raising the limit kept returning more
-  rows (4,650 → 5,032 → 6,716 → 7,093) and the read was *still* truncated at a limit of 12,000.
+  rows (4,650 to 5,032 to 6,716 to 7,093) and the read was *still* truncated at a limit of 12,000.
   Compare rows-returned against the limit you asked for; if they are close, raise it and re-read.
+- **`records()` refuses to return a silently short read.** Because the failure is invisible, the
+  client compares the result against `GET /tables/{t}/count` whenever it reads the unfiltered view,
+  and raises rather than handing back a partial answer. Filtered views are exempt, since they are
+  legitimately shorter than the table. `verify=False` accepts a partial read deliberately.
+- **For anything near those sizes, use `export()` instead of listing.** The export job is not bound
+  by the page size and reports `recordsExportedCount`, so it is the only read that can prove it saw
+  every row.
 - Every table normally has an **`All rows`** view; `rows()` uses it by default. Pass a view name to read a
   filtered subset (`c.rows(t, view="Errored rows")`).
 - View filters support types like `HAS_ERROR`, `RUN_CONDITION_NOT_MET`, `NO_RESULTS`, `EMPTY`: server-side
@@ -654,6 +661,36 @@ Related: probing `POST /tables/{t}/records/bulk|query|list` looks like endpoint 
 If you ever see records with names like that, this is where they came from.
 
 ---
+
+## 12. Known limits and open questions
+
+**Confirmed limits**
+
+- **The REST API does not source.** It builds and runs tables. Sourcing is the MCP's job (§4b), or an
+  external tool. Either way the results reach a table through `insert()`.
+- **No bulk "run all".** You must enumerate record ids.
+- **No records-listing route.** Enumeration is view-scoped (this is fine, just not obvious).
+- **`offset` is ignored** (§7). Paging is by `limit` only, and very large tables cannot be read
+  exhaustively at all. Any count taken from a truncated read is wrong, and if you then *run* the
+  rows you read, everything past the limit keeps stale values.
+
+**Unexplored: worth investigating if you need them**
+
+- **Webhook sources.** `GET /sources?workspaceId=` lists them; creating an inbound webhook source was never
+  attempted. This is the pattern Clay's own docs describe for continuous programmatic row entry, and it may
+  run enrichments on arrival.
+- **Server-side filtered views** via `POST /tables/{t}/views`: create a view for "errored rows" and read
+  only those, instead of filtering locally.
+- **Running Claygent (web-research) columns via the API.** Standard AI columns are proven to execute; the
+  research variant is proven only to be *creatable*. Verify before depending on it.
+- **`workbookId`** appears on every table and is barely explored beyond `/workbooks/{wb}/tables`.
+
+- **MCP ↔ REST are not joined.** An MCP search returns `taskId` / `entityId`; a table holds `t_` / `r_` ids.
+  Nothing links them automatically: you carry the results across yourself.
+
+**A closing warning.** This API is undocumented and can change without notice. Everything here was true when
+tested against a live workspace. Re-verify anything load-bearing before trusting it in production, and treat
+a surprising result as new information about the API rather than a bug in your code.
 
 ---
 
@@ -812,35 +849,3 @@ NEW_GUARD && ( ORIGINAL_CONDITION )
 other live tables create records legitimately while you work, and a system-wide delta will make you
 halt for something that was never yours. And **check the sign**: a *negative* delta is a sampling
 artefact from a truncated read (§7), not a creation.
-
----
-
-## 12. Known limits and open questions
-
-**Confirmed limits**
-
-- **The REST API does not source.** It builds and runs tables. Sourcing is the MCP's job (§4b), or an
-  external tool. Either way the results reach a table through `insert()`.
-- **No bulk "run all".** You must enumerate record ids.
-- **No records-listing route.** Enumeration is view-scoped (this is fine, just not obvious).
-- **`offset` is ignored** (§7). Paging is by `limit` only, and very large tables cannot be read
-  exhaustively at all. Any count taken from a truncated read is wrong, and if you then *run* the
-  rows you read, everything past the limit keeps stale values.
-
-**Unexplored: worth investigating if you need them**
-
-- **Webhook sources.** `GET /sources?workspaceId=` lists them; creating an inbound webhook source was never
-  attempted. This is the pattern Clay's own docs describe for continuous programmatic row entry, and it may
-  run enrichments on arrival.
-- **Server-side filtered views** via `POST /tables/{t}/views`: create a view for "errored rows" and read
-  only those, instead of filtering locally.
-- **Running Claygent (web-research) columns via the API.** Standard AI columns are proven to execute; the
-  research variant is proven only to be *creatable*. Verify before depending on it.
-- **`workbookId`** appears on every table and is barely explored beyond `/workbooks/{wb}/tables`.
-
-- **MCP ↔ REST are not joined.** An MCP search returns `taskId` / `entityId`; a table holds `t_` / `r_` ids.
-  Nothing links them automatically: you carry the results across yourself.
-
-**A closing warning.** This API is undocumented and can change without notice. Everything here was true when
-tested against a live workspace. Re-verify anything load-bearing before trusting it in production, and treat
-a surprising result as new information about the API rather than a bug in your code.
