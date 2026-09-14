@@ -22,7 +22,7 @@ to be corrected and one incident that destroyed live data.
 
 1. [Setup and access](#1-setup-and-access)
 2. [The data model](#2-the-data-model)
-3. [**The ten silent failures**](#3-the-ten-silent-failures) ← read first
+3. [**The seven silent failures**](#3-the-ten-silent-failures) ← read first
 4. [Route reference](#4-route-reference)
 4b. [**The MCP server: sourcing and enrichment**](#4b-the-mcp-server-sourcing-and-enrichment)
 5. [Building a table](#5-building-a-table)
@@ -33,7 +33,7 @@ to be corrected and one incident that destroyed live data.
 10. [A complete worked workflow](#10-a-complete-worked-workflow)
 11. [How to explore the API safely](#11-how-to-explore-the-api-safely)
 12. [Known limits and open questions](#12-known-limits-and-open-questions)
-13. [Auto-run, parking, and what actually triggers a run](#13-auto-run-parking-and-what-actually-triggers-a-run)
+13. Auto-run, parking, and what actually triggers a run
 
 Files here: `clay.py` (the client, which you should import rather than rewrite) and `examples/` (runnable scripts).
 
@@ -537,15 +537,8 @@ one  = c.read(t, "r_abc")              # a single record
   silently returns roughly one page per view and stops: on one table an offset loop returned
   **1,268 rows for a table holding 7,093+**. The only working lever is a **high `limit`**.
 - **Very large tables cannot be enumerated exhaustively.** Raising the limit kept returning more
-  rows (4,650 to 5,032 to 6,716 to 7,093) and the read was *still* truncated at a limit of 12,000.
+  rows (4,650 → 5,032 → 6,716 → 7,093) and the read was *still* truncated at a limit of 12,000.
   Compare rows-returned against the limit you asked for; if they are close, raise it and re-read.
-- **`records()` refuses to return a silently short read.** Because the failure is invisible, the
-  client compares the result against `GET /tables/{t}/count` whenever it reads the unfiltered view,
-  and raises rather than handing back a partial answer. Filtered views are exempt, since they are
-  legitimately shorter than the table. `verify=False` accepts a partial read deliberately.
-- **For anything near those sizes, use `export()` instead of listing.** The export job is not bound
-  by the page size and reports `recordsExportedCount`, so it is the only read that can prove it saw
-  every row.
 - Every table normally has an **`All rows`** view; `rows()` uses it by default. Pass a view name to read a
   filtered subset (`c.rows(t, view="Errored rows")`).
 - View filters support types like `HAS_ERROR`, `RUN_CONDITION_NOT_MET`, `NO_RESULTS`, `EMPTY`: server-side
@@ -661,36 +654,6 @@ Related: probing `POST /tables/{t}/records/bulk|query|list` looks like endpoint 
 If you ever see records with names like that, this is where they came from.
 
 ---
-
-## 12. Known limits and open questions
-
-**Confirmed limits**
-
-- **The REST API does not source.** It builds and runs tables. Sourcing is the MCP's job (§4b), or an
-  external tool. Either way the results reach a table through `insert()`.
-- **No bulk "run all".** You must enumerate record ids.
-- **No records-listing route.** Enumeration is view-scoped (this is fine, just not obvious).
-- **`offset` is ignored** (§7). Paging is by `limit` only, and very large tables cannot be read
-  exhaustively at all. Any count taken from a truncated read is wrong, and if you then *run* the
-  rows you read, everything past the limit keeps stale values.
-
-**Unexplored: worth investigating if you need them**
-
-- **Webhook sources.** `GET /sources?workspaceId=` lists them; creating an inbound webhook source was never
-  attempted. This is the pattern Clay's own docs describe for continuous programmatic row entry, and it may
-  run enrichments on arrival.
-- **Server-side filtered views** via `POST /tables/{t}/views`: create a view for "errored rows" and read
-  only those, instead of filtering locally.
-- **Running Claygent (web-research) columns via the API.** Standard AI columns are proven to execute; the
-  research variant is proven only to be *creatable*. Verify before depending on it.
-- **`workbookId`** appears on every table and is barely explored beyond `/workbooks/{wb}/tables`.
-
-- **MCP ↔ REST are not joined.** An MCP search returns `taskId` / `entityId`; a table holds `t_` / `r_` ids.
-  Nothing links them automatically: you carry the results across yourself.
-
-**A closing warning.** This API is undocumented and can change without notice. Everything here was true when
-tested against a live workspace. Re-verify anything load-bearing before trusting it in production, and treat
-a surprising result as new information about the API rather than a bug in your code.
 
 ---
 
@@ -849,3 +812,339 @@ NEW_GUARD && ( ORIGINAL_CONDITION )
 other live tables create records legitimately while you work, and a system-wide delta will make you
 halt for something that was never yours. And **check the sign**: a *negative* delta is a sampling
 artefact from a truncated read (§7), not a creation.
+
+---
+
+## 14. Config traps the API will not warn you about
+
+Everything here was established by controlled test, usually after it had already cost something.
+
+### 14.1 🔴 The UI can silently delete what the API wrote
+
+**If you set a binding the UI has no control for, any action that re-saves that column in the UI
+destroys it.** Opening the column and unparking it is enough.
+
+This was found the expensive way: a binding was written across two dozen tables, verified present on
+every one by read-back, then handed to a colleague as a list of columns to unpark by hand. Afterwards
+the binding was gone from every table they touched.
+
+Proved by elimination rather than assumed:
+
+| Test | Result |
+|---|---|
+| binding written, then left untouched for two minutes | **survives** — the server does not normalise it away |
+| unpark and re-enable auto-run **through the API** | **survives**, every sibling binding intact |
+| unpark **in the UI** | **binding destroyed** |
+
+**The rule:** when a column carries a binding the UI cannot represent, do the whole sequence through
+the API — park, change, unpark, restore auto-run — and **verify the binding after the restore, not
+just after the write.** Re-reading immediately proves the write landed; it does not prove it will
+still be there once a human opens the column.
+
+This is the one case where the usual "restoring write access is a human decision" (§13.8 step 9) has
+to be done by script. Ask for approval explicitly and explain why, rather than handing over a list.
+
+### 14.2 🔴 A rollout script that runs twice corrupts its own record of prior state
+
+The standard pattern — capture prior state at the top of each table's turn, so it can be restored —
+**breaks silently if the batch is ever re-run.** The second pass reads back the changes the first
+pass made and records *those* as the "prior" values.
+
+Concretely: a batch that sets `AUTO_RUN_ON=false` and parks columns, then dies partway. Re-run it,
+and for every table the first pass reached, prior state is now recorded as "was off, was parked" —
+when the truth was "was on, was live". Dated snapshot files share the flaw when the filename is
+`<table>-<date>-before.json`: the second run overwrites the first run's snapshot.
+
+Restoring from that record does not put things back. It **switches off tables that were running**,
+and nothing errors.
+
+**Write prior state once and refuse to overwrite an existing entry.** Include a run id or timestamp
+in snapshot filenames. When it has already happened, prior state can only be recovered from evidence
+captured *before* the work — an earlier audit, or the snapshots of tables a failed run never reached.
+
+### 14.3 Association bindings are not property bindings
+
+Two different mechanisms that are easy to confuse, because both live in `inputsBinding`:
+
+```python
+"fields|<property>"                     # a property ON the record being created
+"associationFields|toObjectTypeId"      # an explicit association to ANOTHER object
+"associationFields|associationType"     # "<typeId>|<CATEGORY>"
+"associationFields|toObjectId"          # "{{f_...}}" - the id to link to
+```
+
+They are independent: adding an association does not disturb a property that happens to link
+elsewhere, and vice versa. Verify both after writing — the failure mode is a create column that
+looks correct and links the record to only one of the two things you expected.
+
+⚠️ `associationFields|*` is a **single** association slot. Writing it replaces whatever was there.
+Strip existing `associationFields|` entries and re-add, so a re-run cannot nest or duplicate them.
+
+⚠️ The association type id is direction-specific, and the generic and "primary" variants are
+different ids. Read them from the CRM's own schema rather than guessing, and cross-check against how
+existing pairs are actually linked — picking the "primary" variant marks every record you create as
+the primary one, which is usually wrong when you attach several.
+
+### 14.4 `"Dag is cyclical"` also blocks association bindings
+
+§13.5 covers this for run conditions; it applies equally to `associationFields|toObjectId`. If the
+column holding the id you want to link to is computed **downstream** of the create column, binding
+to it closes a loop and the `PATCH` is rejected.
+
+It is **deterministic** — retrying is pointless, and a retry wrapper that does not special-case it
+turns a skippable table into a batch-stopping failure. Catch the message, restore that table, and
+continue.
+
+The fix is structural: the id has to arrive from the source rather than being derived in the same
+table.
+
+### 14.5 Table `updatedAt` is not a data-freshness signal
+
+`table.updatedAt` moves when the **configuration** changes, not only when rows arrive. A table whose
+newest row is months old reads as "updated today" the moment you edit it.
+
+**`record.createdAt` is the only trustworthy arrival timestamp.** Both bulk and per-record reads
+carry it (unlike `extendedContent`, §13.4).
+
+### 14.6 View ordering is per-view, and it decides how expensive a freshness check is
+
+Records come back through a view (§7), and **different views sort differently**. In practice large
+tables tend to return newest-first, so a small `limit` reaches today's rows in a couple of seconds;
+smaller tables often return oldest-first, but they read completely anyway.
+
+So a "did this table produce anything today" check is cheap — **but only if you take the maximum
+`createdAt` across what you read and treat a full page as a floor, not a count.** Since `offset` is
+ignored, a bigger `limit` is the only lever.
+
+### 14.7 Judging whether a table is "late" needs care
+
+If you derive a schedule from a table's own history, measure the gap over **recent calendar days**,
+not over the last N *active* days. The latter invents a daily rhythm for a table that runs every
+third day, and for one that died a year ago whose final active days happened to be consecutive.
+
+Two more rules that cut the false-alarm rate sharply:
+
+- **A table with fewer than two active days has no rhythm.** It is a one-off import and can never be
+  late. Reporting these was the single largest source of noise: one check flagged twenty tables to
+  surface about six real ones, nearly all one-off imports.
+- **A configured period beats an observed one.** Where the table carries a schedule setting, trust
+  it — the observed gap is measured over a truncated read window and under-reads long schedules.
+
+Schedule-related settings worth knowing: a flag for scheduled **runs** and a separate one for
+scheduled **sources**. A recurring feed usually has the *source* scheduled and no scheduled run at
+all, so looking only for scheduled runs will tell you nothing fires.
+
+### 14.8 Formula engine: what is actually available
+
+Confirmed by running each in a throwaway table rather than assuming:
+
+| | |
+|---|---|
+| `Date.now()`, `Date.parse()` | available. `Date.parse("")` is `NaN`, and every `NaN` comparison is false — which is what makes a missing-date branch fail safe |
+| `moment(...)` with `.isValid()` | available, and **necessary**: a guard that only tests for blank still emits an invalid-date string for unparseable input |
+| `\b` in regex | **rejected**. For a word-boundary match, normalise non-letters to spaces, pad both sides, and substring-match the padded needle |
+| Arrow function with several clauses inside `.some(...)` | works |
+| Return type | still strings (§3 #9): compare against `"true"`, never `true` |
+
+The word-boundary point is not academic. A naive substring match of a short place name inside a
+free-text name matched hundreds of unrelated records in one test set — three letters that sit inside
+ordinary words in that language. The padded-normalised form scored zero false matches on the same
+set.
+
+### 14.9 🔴 A formula column reports SUCCESS when the action it reads has failed
+
+**This is the reason a broken column can sit in a workspace for weeks without anything flagging it.**
+
+An action column fails on **every** row. A formula column that reads it evaluates cleanly — optional
+chaining on a failed result yields `undefined`, which is not an error — and so reports `SUCCESS`
+while returning nothing. Everything downstream of the formula then reads blank, and no status
+anywhere says "broken".
+
+Confirmed instance, measured:
+
+| Column | Type | Status | Value |
+|---|---|---|---|
+| the lookup | action | **`ERROR` on 746 of 746 rows** | — |
+| formula A reading it | formula | **`SUCCESS` on 746 of 746** | blank on all 746 |
+| formula B reading it | formula | **`SUCCESS` on 746 of 746** | blank on all 746 |
+| formula C reading it | formula | **`SUCCESS` on 746 of 746** | blank on all 746 |
+
+**One broken action, three formulas all reporting healthy.** The underlying cause was a single token:
+the lookup passed a whole webhook object where the working sister tables passed one field out of it.
+
+**What follows for any health check:**
+
+- **Census action columns by status, and separately check formula columns for values, not status.**
+  A formula at 100% `SUCCESS` and 0% populated is the signature. Status alone will never show it.
+- **Treat "column X is empty everywhere" as a first-class alert**, equal in weight to an error count.
+  It is often more informative, because it survives the masking.
+- When a column *is* empty everywhere, walk **upstream** to what feeds it before touching the column
+  itself. The defect is rarely where the blank appears.
+
+Cross-check a suspect column against a sister table that works. Near-identical tables diverging on
+one binding is the fastest way to find this class of bug, and the diff is usually trivial once seen.
+
+---
+
+## 15. Diagnosing a pipeline that produces nothing
+
+An engine that silently under-produces is harder than one that errors. Everything here came out of
+chasing a single symptom — "most records have no related contacts" — through five wrong diagnoses.
+The traps are generic; the discipline at the end is the part worth keeping.
+
+### 15.1 🔴 An empty field is almost never the bug. Walk upstream.
+
+Every wrong diagnosis in that investigation was **a field that was empty because something feeding
+it was empty**. Each time, the blank looked like the defect and was actually the symptom:
+
+| What looked broken | What was actually broken |
+|---|---|
+| records not linked to their parent | the linking column had no id to link with |
+| that id was missing | the record it came from was never created |
+| a country field empty, blocking a gate | the extraction step that should fill it produced nothing |
+| every scored row scoring zero | the same extraction step |
+
+**When a field is empty: find what writes it, check whether THAT ran, and repeat, until you reach
+something that actually failed.** The bug is where the chain breaks, never where the blank appears.
+
+This is the same rule as §14.9, stated as a procedure rather than a symptom, because knowing it and
+applying it turn out to be different things.
+
+### 15.2 🔴 A cell that FAILED is not a cell that never ran
+
+`keep_existing` does not retry a cell that holds an error. It only fills cells that have **no status
+at all**.
+
+Observed: a column failed on every row because its input was blank. The input was then repaired and
+populated correctly. The column sat at its old error, **auto-run did not pick it up**, and nothing
+changed until it was run explicitly.
+
+So repairing an input is only half a fix. **After fixing what feeds a column, that column must be
+re-run on the affected rows** — and it will not tell you it is waiting.
+
+### 15.3 🔴 An async action column stores the SUBMISSION, not the outcome
+
+A column that calls an API which does work in the background — submit a job, results arrive later by
+webhook — stores **the immediate response** and never updates it.
+
+A payload captured at submission looks like this, and still looks like this a fortnight later:
+
+```json
+{ "status": "RUNNING", "progress_percentage": 0,
+  "csv_result_file_url": null, "credits_deducted": 0 }
+```
+
+**A job that completed and a job that vanished are indistinguishable from the cell.** The status
+field is a snapshot of the first millisecond, not a live view.
+
+Consequences worth designing around:
+
+- **Never read completion from the cell.** Match submissions against arrivals — both sides usually
+  carry a correlation id — and diff the two sets.
+- **Check whether the vendor reports empty results at all.** Many default to silence: if a search
+  finds nothing, nothing is sent. Then "found nothing" and "lost in transit" are the same event from
+  your side. If the API offers a flag for this, set it, or you are choosing to be blind.
+- **Nothing watches the queue.** A submission with no arrival is invisible unless you build the
+  check yourself.
+
+### 15.4 A gate blocking 99% of rows usually means its input is empty
+
+`ERROR_RUN_CONDITION_NOT_MET` at that rate is rarely bad gate logic. Read the gate, take the rows it
+blocked, and check each input it depends on:
+
+- **input empty on all blocked rows** → the gate is fine, something upstream never produced the
+  value. Do not touch the gate.
+- **input populated but not matching** → the condition is too narrow. A different, much smaller fix.
+
+Worth distinguishing before anyone is asked to change anything: they lead to opposite work. In one
+case a country-matching gate blocked 99% of rows on three tables; the value was **empty**, and where
+it *was* filled the gate matched correctly and let the right rows through. The gate was never the
+problem.
+
+### 15.5 Scanning one action type and concluding about the system
+
+A mechanism can be implemented by a **dedicated action type** rather than as a binding on the column
+you expect. Searching the obvious place and finding nothing is not evidence of absence.
+
+Concretely: an association can be a binding on a create column, **or** its own
+`*-create-association` column. Scanning only create columns produced the confident and wrong
+conclusion that nothing in the workspace created associations. Dozens of dedicated columns existed
+and most were working.
+
+**Before concluding a capability is missing, enumerate every `actionKey` in the workspace and look
+for anything that could implement it.**
+
+### 15.6 The grid value is a label. The payload is elsewhere.
+
+§13.7 notes that gates bind the structured value. The sharper version, because it silently breaks
+analysis scripts:
+
+A cell holding a rich object renders in the grid as a short human string. One integration column's
+grid value was literally `"Received September 2nd, 2026"` while the actual payload — containing the
+correlation id needed to match it — was only in `externalContent.fullValue` on a **per-record** read
+(§13.4).
+
+A detector built on the grid value found **zero** matches and would have "proved" that no result
+ever came back. **Any script that greps cell values for structured data must read per-record, and
+must be sanity-checked against a case known to be present.** A scan returning zero is a result to
+distrust, not to report.
+
+### 15.7 Duplicated tables share field ids
+
+Copying a table clones its field ids. Three separate tables were seen carrying the identical column
+id. So a `f_…` grep across the workspace gives false positives, and a worklist keyed by field id
+silently collapses entries.
+
+**Key anything cross-table by `(tableId, fieldId)`, never by field id alone.** Only an explicit
+`tableId` binding proves a real link between two tables.
+
+### 15.8 The discipline, since the traps above are only half the problem
+
+Five wrong diagnoses were not five unlucky measurements. They shared one habit: **reporting a
+finding as the cause the moment it looked real, without checking whether it accounted for the size
+of the gap.**
+
+```
+1. denominator   exclude populations that structurally cannot qualify
+2. arithmetic    does this cause account for the gap? "16% x 73% = 12%, observed 26%"
+                 exposes a missing population instantly
+3. populations   never blend two in one sample; split by origin, age, source first
+4. language      "a contributing cause" until the arithmetic closes
+5. consequence   scale verification to what the claim CAUSES. A sentence is cheap to retract;
+                 a ticket, a document or a config change dispatches a person. Verify first.
+```
+
+Step 2 would have caught three of the five, using numbers already in hand. Step 5 is the one that
+matters most in a shared codebase: the cost of being wrong is not your time, it is someone else's.
+
+---
+
+## 12. Known limits and open questions
+
+**Confirmed limits**
+
+- **The REST API does not source.** It builds and runs tables. Sourcing is the MCP's job (§4b), or an
+  external tool. Either way the results reach a table through `insert()`.
+- **No bulk "run all".** You must enumerate record ids.
+- **No records-listing route.** Enumeration is view-scoped (this is fine, just not obvious).
+- **`offset` is ignored** (§7). Paging is by `limit` only, and very large tables cannot be read
+  exhaustively at all. Any count taken from a truncated read is wrong, and if you then *run* the
+  rows you read, everything past the limit keeps stale values.
+
+**Unexplored: worth investigating if you need them**
+
+- **Webhook sources.** `GET /sources?workspaceId=` lists them; creating an inbound webhook source was never
+  attempted. This is the pattern Clay's own docs describe for continuous programmatic row entry, and it may
+  run enrichments on arrival.
+- **Server-side filtered views** via `POST /tables/{t}/views`: create a view for "errored rows" and read
+  only those, instead of filtering locally.
+- **Running Claygent (web-research) columns via the API.** Standard AI columns are proven to execute; the
+  research variant is proven only to be *creatable*. Verify before depending on it.
+- **`workbookId`** appears on every table and is barely explored beyond `/workbooks/{wb}/tables`.
+
+- **MCP ↔ REST are not joined.** An MCP search returns `taskId` / `entityId`; a table holds `t_` / `r_` ids.
+  Nothing links them automatically: you carry the results across yourself.
+
+**A closing warning.** This API is undocumented and can change without notice. Everything here was true when
+tested against a live workspace. Re-verify anything load-bearing before trusting it in production, and treat
+a surprising result as new information about the API rather than a bug in your code.
